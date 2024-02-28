@@ -135,7 +135,7 @@ class Flask(App):
     #: :class:`~flask.sessions.SecureCookieSessionInterface` is used here.
     #:
     #: .. versionadded:: 0.8
-    session_interface: SessionInterface = SecureCookieSessionInterface()
+    session_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interfacesession_interface: SessionInterface = SecureCookieSessionInterface()
 
     def __init__(
         self,
