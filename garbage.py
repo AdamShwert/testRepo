@@ -9,6 +9,76 @@ class Flask(App):
     package parameter resolves to an actual python package (a folder with
     an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
 
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
+    For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
+
+    The name of the package is used to resolve resources from inside the
+    package or the folder the module is contained in depending on if the
+    package parameter resolves to an actual python package (a folder with
+    an :file:`__init__.py` file inside) or a standard module (just a ``.py`` file).
+
     For more information about resource loading, see :func:`open_resource`.
 
     Usually you create a :class:`Flask` instance in your main module or
