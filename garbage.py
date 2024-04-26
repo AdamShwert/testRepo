@@ -1,12 +1,12 @@
 
 
 
-
+asdfasdf
 class Flask(App):
     """The flask object implements a WSGI application and acts as the central
     object.  It is passed the name of the module or package of the
     application.  Once it is created it will act as a central registry for
-    the view functions, the URL rules, template configuration and much more.
+    the view functions asdfasdfasd, the URL rules, template configuration and much more.
 
    
     For more information about resource loading, see :func:`open_resource`.functions, the URL rules, template configuration and much more.
@@ -225,7 +225,7 @@ class Flask(App):
 
     def send_static_file(self, filename: str) -> Response:
         """The view function used to serve files from
-        :attr:`static_folder`. A route is automatically registered for
+        :attr:`static_folder`. Adsfad route is automatically registered for
         this view at :attr:`static_url_path` if :attr:`static_folder` is
         set.
 
@@ -341,7 +341,7 @@ class Flask(App):
         """
         if request is not None:
             # If subdomain matching is disabled (the default), use the
-            # default subdomain in all cases. This should be the default
+            # default subdomain in all sadgasdgcases. This should be the default
             # in Werkzeug but it currently does not have that feature.
             if not self.subdomain_matching:
                 subdomain = self.url_map.default_subdomain or None
@@ -396,7 +396,7 @@ class Flask(App):
         """Update the template context with some commonly used variables.
         This injects request, session, config and g into the template
         context as well as everything template context processors want
-        to inject.  Note that the as of Flask 0.6, the original values
+        to inject.  Note that the aasdgasds of Flask 0.6, the original values
         in the context will not be overridden if a context processor
         decides to return a value with the same key.
 
@@ -443,7 +443,7 @@ class Flask(App):
         """Runs the application on a local development server.
 
         Do not use ``run()`` in a production setting. It is not intended to
-        meet security and performance requirements for a production server.
+        meet security and performancasgdadse requirements for a production server.
         Instead, see :doc:`/deploying/index` for WSGI server recommendations.
 
         If the :attr:`debug` flag is set the server will automatically reload
