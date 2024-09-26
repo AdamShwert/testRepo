@@ -1,0 +1,12 @@
+# Hide vendored node_modules from PR diffs and git diffs
+node_modules/** linguist-generated -diff
+
+# Hide vendored gem cache files from diffs
+vendor/cache/** linguist-generated -diff
+
+sorbet/rbi/gems/** linguist-generated
+sorbet/rbi/dsl/** linguist-generated
+CODEOWNERS linguist-generated
+
+# Syntax highlighting for comments in commands.json files
+**/commands.json linguist-language=jsonc
