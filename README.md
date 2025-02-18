@@ -1,7 +1,7 @@
 # testRepo
 yeah
 
-
+```mermaid
 graph TD
     classDef box width:fit-content,height:fit-content;
     0["PackageXML[ImportIntoTempImportedInstallerEvidence]"]
@@ -66,3 +66,4 @@ InstallerEvidenceMapper"]
     s17 --> 17
     18["Eventify"]
     s18 --> 18
+```
