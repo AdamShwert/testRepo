@@ -960,6 +960,2007 @@ class Flask(App):
         _scheme: str | None = None,
         _external: bool | None = None,
         **values: t.Any,
+        .. versionadded:: 0.5
+
+        """
+        if not self.has_static_folder:
+            raise RuntimeError("'static_folder' must be set to serve static_files.")
+
+        # send_file only knows to call get_send_file_max_age on the app,
+        # call it here so it works for blueprints too.
+        max_age = self.get_send_file_max_age(filename)
+        return send_from_directory(
+            t.cast(str, self.static_folder), filename, max_age=max_age
+        )
+
+    def open_resource(self, resource: str, mode: str = "rb") -> t.IO[t.AnyStr]:
+        """Open a resource file relative to :attr:`root_path` for
+        reading.
+
+        For example, if the file ``schema.sql`` is next to the file
+        ``app.py`` where the ``Flask`` app is defined, it can be opened
+        with:
+
+        .. code-block:: python
+
+            with app.open_resource("schema.sql") as f:
+                conn.executescript(f.read())
+
+        :param resource: Path to the resource relative to
+            :attr:`root_path`.
+        :param mode: Open the file in this mode. Only reading is
+            supported, valid values are "r" (or "rt") and "rb".
+
+        Note this is a duplicate of the same method in the Flask
+        class.
+
+        """
+        if mode not in {"r", "rt", "rb"}:
+            raise ValueError("Resources can only be opened for reading.")
+
+        return open(os.path.join(self.root_path, resource), mode)
+
+    def open_instance_resource(self, resource: str, mode: str = "rb") -> t.IO[t.AnyStr]:
+        """Opens a resource from the application's instance folder
+        (:attr:`instance_path`).  Otherwise works like
+        :meth:`open_resource`.  Instance resources can also be opened for
+        writing.
+
+        :param resource: the name of the resource.  To access resources within
+                         subfolders use forward slashes as separator.
+        :param mode: resource file opening mode, default is 'rb'.
+        """
+        return open(os.path.join(self.instance_path, resource), mode)
+
+    def create_jinja_environment(self) -> Environment:
+        """Create the Jinja environment based on :attr:`jinja_options`
+        and the various Jinja-related methods of the app. Changing
+        :attr:`jinja_options` after this will have no effect. Also adds
+        Flask-related globals and filters to the environment.
+
+        .. versionchanged:: 0.11
+           ``Environment.auto_reload`` set in accordance with
+           ``TEMPLATES_AUTO_RELOAD`` configuration option.
+
+        .. versionadded:: 0.5
+        """
+        options = dict(self.jinja_options)
+
+        if "autoescape" not in options:
+            options["autoescape"] = self.select_jinja_autoescape
+
+        if "auto_reload" not in options:
+            auto_reload = self.config["TEMPLATES_AUTO_RELOAD"]
+
+            if auto_reload is None:
+                auto_reload = self.debug
+
+            options["auto_reload"] = auto_reload
+
+        rv = self.jinja_environment(self, **options)
+        rv.globals.update(
+            url_for=self.url_for,
+            get_flashed_messages=get_flashed_messages,
+            config=self.config,
+            # request, session and g are normally added with the
+            # context processor for efficiency reasons but for imported
+            # templates we also want the proxies in there.
+            request=request,
+            session=session,
+            g=g,
+        )
+        rv.policies["json.dumps_function"] = self.json.dumps
+        return rv
+
+    def create_url_adapter(self, request: Request | None) -> MapAdapter | None:
+        """Creates a URL adapter for the given request. The URL adapter
+        is created at a point where the request context is not yet set
+        up so the request is passed explicitly.
+
+        .. versionadded:: 0.6
+
+        .. versionchanged:: 0.9
+           This can now also be called without a request object when the
+           URL adapter is created for the application context.
+
+        .. versionchanged:: 1.0
+            :data:`SERVER_NAME` no longer implicitly enables subdomain
+            matching. Use :attr:`subdomain_matching` instead.
+        """
+        if request is not None:
+            # If subdomain matching is disabled (the default), use the
+            # default subdomain in all cases. This should be the default
+            # in Werkzeug but it currently does not have that feature.
+            if not self.subdomain_matching:
+                subdomain = self.url_map.default_subdomain or None
+            else:
+                subdomain = None
+
+            return self.url_map.bind_to_environ(
+                request.environ,
+                server_name=self.config["SERVER_NAME"],
+                subdomain=subdomain,
+            )
+        # We need at the very least the server name to be set for this
+        # to work.
+        if self.config["SERVER_NAME"] is not None:
+            return self.url_map.bind(
+                self.config["SERVER_NAME"],
+                script_name=self.config["APPLICATION_ROOT"],
+                url_scheme=self.config["PREFERRED_URL_SCHEME"],
+            )
+
+        return None
+
+    def raise_routing_exception(self, request: Request) -> t.NoReturn:
+        """Intercept routing exceptions and possibly do something else.
+
+        In debug mode, intercept a routing redirect and replace it with
+        an error if the body will be discarded.
+
+        With modern Werkzeug this shouldn't occur, since it now uses a
+        308 status which tells the browser to resend the method and
+        body.
+
+        .. versionchanged:: 2.1
+            Don't intercept 307 and 308 redirects.
+
+        :meta private:
+        :internal:
+        """
+        if (
+            not self.debug
+            or not isinstance(request.routing_exception, RequestRedirect)
+            or request.routing_exception.code in {307, 308}
+            or request.method in {"GET", "HEAD", "OPTIONS"}
+        ):
+            raise request.routing_exception  # type: ignore
+
+        from .debughelpers import FormDataRoutingRedirect
+
+        raise FormDataRoutingRedirect(request)
+
+    def update_template_context(self, context: dict) -> None:
+        """Update the template context with some commonly used variables.
+        This injects request, session, config and g into the template
+        context as well as everything template context processors want
+        to inject.  Note that the as of Flask 0.6, the original values
+        in the context will not be overridden if a context processor
+        decides to return a value with the same key.
+
+        :param context: the context as a dictionary that is updated in place
+                        to add extra variables.
+        """
+        names: t.Iterable[str | None] = (None,)
+
+        # A template may be rendered outside a request context.
+        if request:
+            names = chain(names, reversed(request.blueprints))
+
+        # The values passed to render_template take precedence. Keep a
+        # copy to re-apply after all context functions.
+        orig_ctx = context.copy()
+
+        for name in names:
+            if name in self.template_context_processors:
+                for func in self.template_context_processors[name]:
+                    context.update(self.ensure_sync(func)())
+
+        context.update(orig_ctx)
+
+    def make_shell_context(self) -> dict:
+        """Returns the shell context for an interactive shell for this
+        application.  This runs all the registered shell context
+        processors.
+
+        .. versionadded:: 0.11
+        """
+        rv = {"app": self, "g": g}
+        for processor in self.shell_context_processors:
+            rv.update(processor())
+        return rv
+
+    def run(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        debug: bool | None = None,
+        load_dotenv: bool = True,
+        **options: t.Any,
+    ) -> None:
+        """Runs the application on a local development server.
+
+        Do not use ``run()`` in a production setting. It is not intended to
+        meet security and performance requirements for a production server.
+        Instead, see :doc:`/deploying/index` for WSGI server recommendations.
+
+        If the :attr:`debug` flag is set the server will automatically reload
+        for code changes and show a debugger in case an exception happened.
+
+        If you want to run the application in debug mode, but disable the
+        code execution on the interactive debugger, you can pass
+        ``use_evalex=False`` as parameter.  This will keep the debugger's
+        traceback screen active, but disable code execution.
+
+        It is not recommended to use this function for development with
+        automatic reloading as this is badly supported.  Instead you should
+        be using the :command:`flask` command line script's ``run`` support.
+
+        .. admonition:: Keep in Mind
+
+           Flask will suppress any server error with a generic error page
+           unless it is in debug mode.  As such to enable just the
+           interactive debugger without the code reloading, you have to
+           invoke :meth:`run` with ``debug=True`` and ``use_reloader=False``.
+           Setting ``use_debugger`` to ``True`` without being in debug mode
+           won't catch any exceptions because there won't be any to
+           catch.
+
+        :param host: the hostname to listen on. Set this to ``'0.0.0.0'`` to
+            have the server available externally as well. Defaults to
+            ``'127.0.0.1'`` or the host in the ``SERVER_NAME`` config variable
+            if present.
+        :param port: the port of the webserver. Defaults to ``5000`` or the
+            port defined in the ``SERVER_NAME`` config variable if present.
+        :param debug: if given, enable or disable debug mode. See
+            :attr:`debug`.
+        :param load_dotenv: Load the nearest :file:`.env` and :file:`.flaskenv`
+            files to set environment variables. Will also change the working
+            directory to the directory containing the first file found.
+        :param options: the options to be forwarded to the underlying Werkzeug
+            server. See :func:`werkzeug.serving.run_simple` for more
+            information.
+
+        .. versionchanged:: 1.0
+            If installed, python-dotenv will be used to load environment
+            variables from :file:`.env` and :file:`.flaskenv` files.
+
+            The :envvar:`FLASK_DEBUG` environment variable will override :attr:`debug`.
+
+            Threaded mode is enabled by default.
+
+        .. versionchanged:: 0.10
+            The default port is now picked from the ``SERVER_NAME``
+            variable.
+        """
+        # Ignore this call so that it doesn't start another server if
+        # the 'flask run' command is used.
+        if os.environ.get("FLASK_RUN_FROM_CLI") == "true":
+            if not is_running_from_reloader():
+                click.secho(
+                    " * Ignoring a call to 'app.run()' that would block"
+                    " the current 'flask' CLI command.\n"
+                    "   Only call 'app.run()' in an 'if __name__ =="
+                    ' "__main__"\' guard.',
+                    fg="red",
+                )
+
+            return
+
+        if get_load_dotenv(load_dotenv):
+            cli.load_dotenv()
+
+            # if set, env var overrides existing value
+            if "FLASK_DEBUG" in os.environ:
+                self.debug = get_debug_flag()
+
+        # debug passed to method overrides all other sources
+        if debug is not None:
+            self.debug = bool(debug)
+
+        server_name = self.config.get("SERVER_NAME")
+        sn_host = sn_port = None
+
+        if server_name:
+            sn_host, _, sn_port = server_name.partition(":")
+
+        if not host:
+            if sn_host:
+                host = sn_host
+            else:
+                host = "127.0.0.1"
+
+        if port or port == 0:
+            port = int(port)
+        elif sn_port:
+            port = int(sn_port)
+        else:
+            port = 5000
+
+        options.setdefault("use_reloader", self.debug)
+        options.setdefault("use_debugger", self.debug)
+        options.setdefault("threaded", True)
+
+        cli.show_server_banner(self.debug, self.name)
+
+        from werkzeug.serving import run_simple
+
+        try:
+            run_simple(t.cast(str, host), port, self, **options)
+        finally:
+            # reset the first request information if the development server
+            # reset normally.  This makes it possible to restart the server
+            # without reloader and that stuff from an interactive shell.
+            self._got_first_request = False
+
+    def test_client(self, use_cookies: bool = True, **kwargs: t.Any) -> FlaskClient:
+        """Creates a test client for this application.  For information
+        about unit testing head over to :doc:`/testing`.
+
+        Note that if you are testing for assertions or exceptions in your
+        application code, you must set ``app.testing = True`` in order for the
+        exceptions to propagate to the test client.  Otherwise, the exception
+        will be handled by the application (not visible to the test client) and
+        the only indication of an AssertionError or other exception will be a
+        500 status code response to the test client.  See the :attr:`testing`
+        attribute.  For example::
+
+            app.testing = True
+            client = app.test_client()
+
+        The test client can be used in a ``with`` block to defer the closing down
+        of the context until the end of the ``with`` block.  This is useful if
+        you want to access the context locals for testing::
+
+            with app.test_client() as c:
+                rv = c.get('/?vodka=42')
+                assert request.args['vodka'] == '42'
+
+        Additionally, you may pass optional keyword arguments that will then
+        be passed to the application's :attr:`test_client_class` constructor.
+        For example::
+
+            from flask.testing import FlaskClient
+
+            class CustomClient(FlaskClient):
+                def __init__(self, *args, **kwargs):
+                    self._authentication = kwargs.pop("authentication")
+                    super(CustomClient,self).__init__( *args, **kwargs)
+
+            app.test_client_class = CustomClient
+            client = app.test_client(authentication='Basic ....')
+
+        See :class:`~flask.testing.FlaskClient` for more information.
+
+        .. versionchanged:: 0.4
+           added support for ``with`` block usage for the client.
+
+        .. versionadded:: 0.7
+           The `use_cookies` parameter was added as well as the ability
+           to override the client to be used by setting the
+           :attr:`test_client_class` attribute.
+
+        .. versionchanged:: 0.11
+           Added `**kwargs` to support passing additional keyword arguments to
+           the constructor of :attr:`test_client_class`.
+        """
+        cls = self.test_client_class
+        if cls is None:
+            from .testing import FlaskClient as cls
+        return cls(  # type: ignore
+            self, self.response_class, use_cookies=use_cookies, **kwargs
+        )
+
+    def test_cli_runner(self, **kwargs: t.Any) -> FlaskCliRunner:
+        """Create a CLI runner for testing CLI commands.
+        See :ref:`testing-cli`.
+
+        Returns an instance of :attr:`test_cli_runner_class`, by default
+        :class:`~flask.testing.FlaskCliRunner`. The Flask app object is
+        passed as the first argument.
+
+        .. versionadded:: 1.0
+        """
+        cls = self.test_cli_runner_class
+
+        if cls is None:
+            from .testing import FlaskCliRunner as cls
+
+        return cls(self, **kwargs)  # type: ignore
+
+    def handle_http_exception(
+        self, e: HTTPException
+    ) -> HTTPException | ft.ResponseReturnValue:
+        """Handles an HTTP exception.  By default this will invoke the
+        registered error handlers and fall back to returning the
+        exception as response.
+
+        .. versionchanged:: 1.0.3
+            ``RoutingException``, used internally for actions such as
+             slash redirects during routing, is not passed to error
+             handlers.
+
+        .. versionchanged:: 1.0
+            Exceptions are looked up by code *and* by MRO, so
+            ``HTTPException`` subclasses can be handled with a catch-all
+            handler for the base ``HTTPException``.
+
+        .. versionadded:: 0.3
+        """
+        # Proxy exceptions don't have error codes.  We want to always return
+        # those unchanged as errors
+        if e.code is None:
+            return e
+
+        # RoutingExceptions are used internally to trigger routing
+        # actions, such as slash redirects raising RequestRedirect. They
+        # are not raised or handled in user code.
+        if isinstance(e, RoutingException):
+            return e
+
+        handler = self._find_error_handler(e, request.blueprints)
+        if handler is None:
+            return e
+        return self.ensure_sync(handler)(e)
+
+    def handle_user_exception(
+        self, e: Exception
+    ) -> HTTPException | ft.ResponseReturnValue:
+        """This method is called whenever an exception occurs that
+        should be handled. A special case is :class:`~werkzeug
+        .exceptions.HTTPException` which is forwarded to the
+        :meth:`handle_http_exception` method. This function will either
+        return a response value or reraise the exception with the same
+        traceback.
+
+        .. versionchanged:: 1.0
+            Key errors raised from request data like ``form`` show the
+            bad key in debug mode rather than a generic bad request
+            message.
+
+        .. versionadded:: 0.7
+        """
+        if isinstance(e, BadRequestKeyError) and (
+            self.debug or self.config["TRAP_BAD_REQUEST_ERRORS"]
+        ):
+            e.show_exception = True
+
+        if isinstance(e, HTTPException) and not self.trap_http_exception(e):
+            return self.handle_http_exception(e)
+
+        handler = self._find_error_handler(e, request.blueprints)
+
+        if handler is None:
+            raise
+
+        return self.ensure_sync(handler)(e)
+
+    def handle_exception(self, e: Exception) -> Response:
+        """Handle an exception that did not have an error handler
+        associated with it, or that was raised from an error handler.
+        This always causes a 500 ``InternalServerError``.
+
+        Always sends the :data:`got_request_exception` signal.
+
+        If :data:`PROPAGATE_EXCEPTIONS` is ``True``, such as in debug
+        mode, the error will be re-raised so that the debugger can
+        display it. Otherwise, the original exception is logged, and
+        an :exc:`~werkzeug.exceptions.InternalServerError` is returned.
+
+        If an error handler is registered for ``InternalServerError`` or
+        ``500``, it will be used. For consistency, the handler will
+        always receive the ``InternalServerError``. The original
+        unhandled exception is available as ``e.original_exception``.
+
+        .. versionchanged:: 1.1.0
+            Always passes the ``InternalServerError`` instance to the
+            handler, setting ``original_exception`` to the unhandled
+            error.
+
+        .. versionchanged:: 1.1.0
+            ``after_request`` functions and other finalization is done
+            even for the default 500 response when there is no handler.
+
+        .. versionadded:: 0.3
+        """
+        exc_info = sys.exc_info()
+        got_request_exception.send(self, _async_wrapper=self.ensure_sync, exception=e)
+        propagate = self.config["PROPAGATE_EXCEPTIONS"]
+
+        if propagate is None:
+            propagate = self.testing or self.debug
+
+        if propagate:
+            # Re-raise if called with an active exception, otherwise
+            # raise the passed in exception.
+            if exc_info[1] is e:
+                raise
+
+            raise e
+
+        self.log_exception(exc_info)
+        server_error: InternalServerError | ft.ResponseReturnValue
+        server_error = InternalServerError(original_exception=e)
+        handler = self._find_error_handler(server_error, request.blueprints)
+
+        if handler is not None:
+            server_error = self.ensure_sync(handler)(server_error)
+
+        return self.finalize_request(server_error, from_error_handler=True)
+
+    def log_exception(
+        self,
+        exc_info: (tuple[type, BaseException, TracebackType] | tuple[None, None, None]),
+    ) -> None:
+        """Logs an exception.  This is called by :meth:`handle_exception`
+        if debugging is disabled and right before the handler is called.
+        The default implementation logs the exception as error on the
+        :attr:`logger`.
+
+        .. versionadded:: 0.8
+        """
+        self.logger.error(
+            f"Exception on {request.path} [{request.method}]", exc_info=exc_info
+        )
+
+    def dispatch_request(self) -> ft.ResponseReturnValue:
+        """Does the request dispatching.  Matches the URL and returns the
+        return value of the view or error handler.  This does not have to
+        be a response object.  In order to convert the return value to a
+        proper response object, call :func:`make_response`.
+
+        .. versionchanged:: 0.7
+           This no longer does the exception handling, this code was
+           moved to the new :meth:`full_dispatch_request`.
+        """
+        req = request_ctx.request
+        if req.routing_exception is not None:
+            self.raise_routing_exception(req)
+        rule: Rule = req.url_rule  # type: ignore[assignment]
+        # if we provide automatic options for this URL and the
+        # request came with the OPTIONS method, reply automatically
+        if (
+            getattr(rule, "provide_automatic_options", False)
+            and req.method == "OPTIONS"
+        ):
+            return self.make_default_options_response()
+        # otherwise dispatch to the handler for that endpoint
+        view_args: dict[str, t.Any] = req.view_args  # type: ignore[assignment]
+        return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+
+    def full_dispatch_request(self) -> Response:
+        """Dispatches the request and on top of that performs request
+        pre and postprocessing as well as HTTP exception catching and
+        error handling.
+
+        .. versionadded:: 0.7
+        """
+        self._got_first_request = True
+
+        try:
+            request_started.send(self, _async_wrapper=self.ensure_sync)
+            rv = self.preprocess_request()
+            if rv is None:
+                rv = self.dispatch_request()
+        except Exception as e:
+            rv = self.handle_user_exception(e)
+        return self.finalize_request(rv)
+
+    def finalize_request(
+        self,
+        rv: ft.ResponseReturnValue | HTTPException,
+        from_error_handler: bool = False,
+    ) -> Response:
+        """Given the return value from a view function this finalizes
+        the request by converting it into a response and invoking the
+        postprocessing functions.  This is invoked for both normal
+        request dispatching as well as error handlers.
+
+        Because this means that it might be called as a result of a
+        failure a special safe mode is available which can be enabled
+        with the `from_error_handler` flag.  If enabled, failures in
+        response processing will be logged and otherwise ignored.
+
+        :internal:
+        """
+        response = self.make_response(rv)
+        try:
+            response = self.process_response(response)
+            request_finished.send(
+                self, _async_wrapper=self.ensure_sync, response=response
+            )
+        except Exception:
+            if not from_error_handler:
+                raise
+            self.logger.exception(
+                "Request finalizing failed with an error while handling an error"
+            )
+        return response
+
+    def make_default_options_response(self) -> Response:
+        """This method is called to create the default ``OPTIONS`` response.
+        This can be changed through subclassing to change the default
+        behavior of ``OPTIONS`` responses.
+
+        .. versionadded:: 0.7
+        """
+        adapter = request_ctx.url_adapter
+        methods = adapter.allowed_methods()  # type: ignore[union-attr]
+        rv = self.response_class()
+        rv.allow.update(methods)
+        return rv
+
+    def ensure_sync(self, func: t.Callable) -> t.Callable:
+        """Ensure that the function is synchronous for WSGI workers.
+        Plain ``def`` functions are returned as-is. ``async def``
+        functions are wrapped to run and wait for the response.
+
+        Override this method to change how the app runs async views.
+
+        .. versionadded:: 2.0
+        """
+        if iscoroutinefunction(func):
+            return self.async_to_sync(func)
+
+        return func
+
+    def async_to_sync(
+        self, func: t.Callable[..., t.Coroutine]
+    ) -> t.Callable[..., t.Any]:
+        """Return a sync function that will run the coroutine function.
+
+        .. code-block:: python
+
+            result = app.async_to_sync(func)(*args, **kwargs)
+
+        Override this method to change how the app converts async code
+        to be synchronously callable.
+
+        .. versionadded:: 2.0
+        """
+        try:
+            from asgiref.sync import async_to_sync as asgiref_async_to_sync
+        except ImportError:
+            raise RuntimeError(
+                "Install Flask with the 'async' extra in order to use async views."
+            ) from None
+
+        return asgiref_async_to_sync(func)
+
+    def url_for(
+        self,
+        /,
+        endpoint: str,
+        *,
+        _anchor: str | None = None,
+        _method: str | None = None,
+        _scheme: str | None = None,
+        _external: bool | None = None,
+        **values: t.Any,
+        .. versionadded:: 0.5
+
+        """
+        if not self.has_static_folder:
+            raise RuntimeError("'static_folder' must be set to serve static_files.")
+
+        # send_file only knows to call get_send_file_max_age on the app,
+        # call it here so it works for blueprints too.
+        max_age = self.get_send_file_max_age(filename)
+        return send_from_directory(
+            t.cast(str, self.static_folder), filename, max_age=max_age
+        )
+
+    def open_resource(self, resource: str, mode: str = "rb") -> t.IO[t.AnyStr]:
+        """Open a resource file relative to :attr:`root_path` for
+        reading.
+
+        For example, if the file ``schema.sql`` is next to the file
+        ``app.py`` where the ``Flask`` app is defined, it can be opened
+        with:
+
+        .. code-block:: python
+
+            with app.open_resource("schema.sql") as f:
+                conn.executescript(f.read())
+
+        :param resource: Path to the resource relative to
+            :attr:`root_path`.
+        :param mode: Open the file in this mode. Only reading is
+            supported, valid values are "r" (or "rt") and "rb".
+
+        Note this is a duplicate of the same method in the Flask
+        class.
+
+        """
+        if mode not in {"r", "rt", "rb"}:
+            raise ValueError("Resources can only be opened for reading.")
+
+        return open(os.path.join(self.root_path, resource), mode)
+
+    def open_instance_resource(self, resource: str, mode: str = "rb") -> t.IO[t.AnyStr]:
+        """Opens a resource from the application's instance folder
+        (:attr:`instance_path`).  Otherwise works like
+        :meth:`open_resource`.  Instance resources can also be opened for
+        writing.
+
+        :param resource: the name of the resource.  To access resources within
+                         subfolders use forward slashes as separator.
+        :param mode: resource file opening mode, default is 'rb'.
+        """
+        return open(os.path.join(self.instance_path, resource), mode)
+
+    def create_jinja_environment(self) -> Environment:
+        """Create the Jinja environment based on :attr:`jinja_options`
+        and the various Jinja-related methods of the app. Changing
+        :attr:`jinja_options` after this will have no effect. Also adds
+        Flask-related globals and filters to the environment.
+
+        .. versionchanged:: 0.11
+           ``Environment.auto_reload`` set in accordance with
+           ``TEMPLATES_AUTO_RELOAD`` configuration option.
+
+        .. versionadded:: 0.5
+        """
+        options = dict(self.jinja_options)
+
+        if "autoescape" not in options:
+            options["autoescape"] = self.select_jinja_autoescape
+
+        if "auto_reload" not in options:
+            auto_reload = self.config["TEMPLATES_AUTO_RELOAD"]
+
+            if auto_reload is None:
+                auto_reload = self.debug
+
+            options["auto_reload"] = auto_reload
+
+        rv = self.jinja_environment(self, **options)
+        rv.globals.update(
+            url_for=self.url_for,
+            get_flashed_messages=get_flashed_messages,
+            config=self.config,
+            # request, session and g are normally added with the
+            # context processor for efficiency reasons but for imported
+            # templates we also want the proxies in there.
+            request=request,
+            session=session,
+            g=g,
+        )
+        rv.policies["json.dumps_function"] = self.json.dumps
+        return rv
+
+    def create_url_adapter(self, request: Request | None) -> MapAdapter | None:
+        """Creates a URL adapter for the given request. The URL adapter
+        is created at a point where the request context is not yet set
+        up so the request is passed explicitly.
+
+        .. versionadded:: 0.6
+
+        .. versionchanged:: 0.9
+           This can now also be called without a request object when the
+           URL adapter is created for the application context.
+
+        .. versionchanged:: 1.0
+            :data:`SERVER_NAME` no longer implicitly enables subdomain
+            matching. Use :attr:`subdomain_matching` instead.
+        """
+        if request is not None:
+            # If subdomain matching is disabled (the default), use the
+            # default subdomain in all cases. This should be the default
+            # in Werkzeug but it currently does not have that feature.
+            if not self.subdomain_matching:
+                subdomain = self.url_map.default_subdomain or None
+            else:
+                subdomain = None
+
+            return self.url_map.bind_to_environ(
+                request.environ,
+                server_name=self.config["SERVER_NAME"],
+                subdomain=subdomain,
+            )
+        # We need at the very least the server name to be set for this
+        # to work.
+        if self.config["SERVER_NAME"] is not None:
+            return self.url_map.bind(
+                self.config["SERVER_NAME"],
+                script_name=self.config["APPLICATION_ROOT"],
+                url_scheme=self.config["PREFERRED_URL_SCHEME"],
+            )
+
+        return None
+
+    def raise_routing_exception(self, request: Request) -> t.NoReturn:
+        """Intercept routing exceptions and possibly do something else.
+
+        In debug mode, intercept a routing redirect and replace it with
+        an error if the body will be discarded.
+
+        With modern Werkzeug this shouldn't occur, since it now uses a
+        308 status which tells the browser to resend the method and
+        body.
+
+        .. versionchanged:: 2.1
+            Don't intercept 307 and 308 redirects.
+
+        :meta private:
+        :internal:
+        """
+        if (
+            not self.debug
+            or not isinstance(request.routing_exception, RequestRedirect)
+            or request.routing_exception.code in {307, 308}
+            or request.method in {"GET", "HEAD", "OPTIONS"}
+        ):
+            raise request.routing_exception  # type: ignore
+
+        from .debughelpers import FormDataRoutingRedirect
+
+        raise FormDataRoutingRedirect(request)
+
+    def update_template_context(self, context: dict) -> None:
+        """Update the template context with some commonly used variables.
+        This injects request, session, config and g into the template
+        context as well as everything template context processors want
+        to inject.  Note that the as of Flask 0.6, the original values
+        in the context will not be overridden if a context processor
+        decides to return a value with the same key.
+
+        :param context: the context as a dictionary that is updated in place
+                        to add extra variables.
+        """
+        names: t.Iterable[str | None] = (None,)
+
+        # A template may be rendered outside a request context.
+        if request:
+            names = chain(names, reversed(request.blueprints))
+
+        # The values passed to render_template take precedence. Keep a
+        # copy to re-apply after all context functions.
+        orig_ctx = context.copy()
+
+        for name in names:
+            if name in self.template_context_processors:
+                for func in self.template_context_processors[name]:
+                    context.update(self.ensure_sync(func)())
+
+        context.update(orig_ctx)
+
+    def make_shell_context(self) -> dict:
+        """Returns the shell context for an interactive shell for this
+        application.  This runs all the registered shell context
+        processors.
+
+        .. versionadded:: 0.11
+        """
+        rv = {"app": self, "g": g}
+        for processor in self.shell_context_processors:
+            rv.update(processor())
+        return rv
+
+    def run(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        debug: bool | None = None,
+        load_dotenv: bool = True,
+        **options: t.Any,
+    ) -> None:
+        """Runs the application on a local development server.
+
+        Do not use ``run()`` in a production setting. It is not intended to
+        meet security and performance requirements for a production server.
+        Instead, see :doc:`/deploying/index` for WSGI server recommendations.
+
+        If the :attr:`debug` flag is set the server will automatically reload
+        for code changes and show a debugger in case an exception happened.
+
+        If you want to run the application in debug mode, but disable the
+        code execution on the interactive debugger, you can pass
+        ``use_evalex=False`` as parameter.  This will keep the debugger's
+        traceback screen active, but disable code execution.
+
+        It is not recommended to use this function for development with
+        automatic reloading as this is badly supported.  Instead you should
+        be using the :command:`flask` command line script's ``run`` support.
+
+        .. admonition:: Keep in Mind
+
+           Flask will suppress any server error with a generic error page
+           unless it is in debug mode.  As such to enable just the
+           interactive debugger without the code reloading, you have to
+           invoke :meth:`run` with ``debug=True`` and ``use_reloader=False``.
+           Setting ``use_debugger`` to ``True`` without being in debug mode
+           won't catch any exceptions because there won't be any to
+           catch.
+
+        :param host: the hostname to listen on. Set this to ``'0.0.0.0'`` to
+            have the server available externally as well. Defaults to
+            ``'127.0.0.1'`` or the host in the ``SERVER_NAME`` config variable
+            if present.
+        :param port: the port of the webserver. Defaults to ``5000`` or the
+            port defined in the ``SERVER_NAME`` config variable if present.
+        :param debug: if given, enable or disable debug mode. See
+            :attr:`debug`.
+        :param load_dotenv: Load the nearest :file:`.env` and :file:`.flaskenv`
+            files to set environment variables. Will also change the working
+            directory to the directory containing the first file found.
+        :param options: the options to be forwarded to the underlying Werkzeug
+            server. See :func:`werkzeug.serving.run_simple` for more
+            information.
+
+        .. versionchanged:: 1.0
+            If installed, python-dotenv will be used to load environment
+            variables from :file:`.env` and :file:`.flaskenv` files.
+
+            The :envvar:`FLASK_DEBUG` environment variable will override :attr:`debug`.
+
+            Threaded mode is enabled by default.
+
+        .. versionchanged:: 0.10
+            The default port is now picked from the ``SERVER_NAME``
+            variable.
+        """
+        # Ignore this call so that it doesn't start another server if
+        # the 'flask run' command is used.
+        if os.environ.get("FLASK_RUN_FROM_CLI") == "true":
+            if not is_running_from_reloader():
+                click.secho(
+                    " * Ignoring a call to 'app.run()' that would block"
+                    " the current 'flask' CLI command.\n"
+                    "   Only call 'app.run()' in an 'if __name__ =="
+                    ' "__main__"\' guard.',
+                    fg="red",
+                )
+
+            return
+
+        if get_load_dotenv(load_dotenv):
+            cli.load_dotenv()
+
+            # if set, env var overrides existing value
+            if "FLASK_DEBUG" in os.environ:
+                self.debug = get_debug_flag()
+
+        # debug passed to method overrides all other sources
+        if debug is not None:
+            self.debug = bool(debug)
+
+        server_name = self.config.get("SERVER_NAME")
+        sn_host = sn_port = None
+
+        if server_name:
+            sn_host, _, sn_port = server_name.partition(":")
+
+        if not host:
+            if sn_host:
+                host = sn_host
+            else:
+                host = "127.0.0.1"
+
+        if port or port == 0:
+            port = int(port)
+        elif sn_port:
+            port = int(sn_port)
+        else:
+            port = 5000
+
+        options.setdefault("use_reloader", self.debug)
+        options.setdefault("use_debugger", self.debug)
+        options.setdefault("threaded", True)
+
+        cli.show_server_banner(self.debug, self.name)
+
+        from werkzeug.serving import run_simple
+
+        try:
+            run_simple(t.cast(str, host), port, self, **options)
+        finally:
+            # reset the first request information if the development server
+            # reset normally.  This makes it possible to restart the server
+            # without reloader and that stuff from an interactive shell.
+            self._got_first_request = False
+
+    def test_client(self, use_cookies: bool = True, **kwargs: t.Any) -> FlaskClient:
+        """Creates a test client for this application.  For information
+        about unit testing head over to :doc:`/testing`.
+
+        Note that if you are testing for assertions or exceptions in your
+        application code, you must set ``app.testing = True`` in order for the
+        exceptions to propagate to the test client.  Otherwise, the exception
+        will be handled by the application (not visible to the test client) and
+        the only indication of an AssertionError or other exception will be a
+        500 status code response to the test client.  See the :attr:`testing`
+        attribute.  For example::
+
+            app.testing = True
+            client = app.test_client()
+
+        The test client can be used in a ``with`` block to defer the closing down
+        of the context until the end of the ``with`` block.  This is useful if
+        you want to access the context locals for testing::
+
+            with app.test_client() as c:
+                rv = c.get('/?vodka=42')
+                assert request.args['vodka'] == '42'
+
+        Additionally, you may pass optional keyword arguments that will then
+        be passed to the application's :attr:`test_client_class` constructor.
+        For example::
+
+            from flask.testing import FlaskClient
+
+            class CustomClient(FlaskClient):
+                def __init__(self, *args, **kwargs):
+                    self._authentication = kwargs.pop("authentication")
+                    super(CustomClient,self).__init__( *args, **kwargs)
+
+            app.test_client_class = CustomClient
+            client = app.test_client(authentication='Basic ....')
+
+        See :class:`~flask.testing.FlaskClient` for more information.
+
+        .. versionchanged:: 0.4
+           added support for ``with`` block usage for the client.
+
+        .. versionadded:: 0.7
+           The `use_cookies` parameter was added as well as the ability
+           to override the client to be used by setting the
+           :attr:`test_client_class` attribute.
+
+        .. versionchanged:: 0.11
+           Added `**kwargs` to support passing additional keyword arguments to
+           the constructor of :attr:`test_client_class`.
+        """
+        cls = self.test_client_class
+        if cls is None:
+            from .testing import FlaskClient as cls
+        return cls(  # type: ignore
+            self, self.response_class, use_cookies=use_cookies, **kwargs
+        )
+
+    def test_cli_runner(self, **kwargs: t.Any) -> FlaskCliRunner:
+        """Create a CLI runner for testing CLI commands.
+        See :ref:`testing-cli`.
+
+        Returns an instance of :attr:`test_cli_runner_class`, by default
+        :class:`~flask.testing.FlaskCliRunner`. The Flask app object is
+        passed as the first argument.
+
+        .. versionadded:: 1.0
+        """
+        cls = self.test_cli_runner_class
+
+        if cls is None:
+            from .testing import FlaskCliRunner as cls
+
+        return cls(self, **kwargs)  # type: ignore
+
+    def handle_http_exception(
+        self, e: HTTPException
+    ) -> HTTPException | ft.ResponseReturnValue:
+        """Handles an HTTP exception.  By default this will invoke the
+        registered error handlers and fall back to returning the
+        exception as response.
+
+        .. versionchanged:: 1.0.3
+            ``RoutingException``, used internally for actions such as
+             slash redirects during routing, is not passed to error
+             handlers.
+
+        .. versionchanged:: 1.0
+            Exceptions are looked up by code *and* by MRO, so
+            ``HTTPException`` subclasses can be handled with a catch-all
+            handler for the base ``HTTPException``.
+
+        .. versionadded:: 0.3
+        """
+        # Proxy exceptions don't have error codes.  We want to always return
+        # those unchanged as errors
+        if e.code is None:
+            return e
+
+        # RoutingExceptions are used internally to trigger routing
+        # actions, such as slash redirects raising RequestRedirect. They
+        # are not raised or handled in user code.
+        if isinstance(e, RoutingException):
+            return e
+
+        handler = self._find_error_handler(e, request.blueprints)
+        if handler is None:
+            return e
+        return self.ensure_sync(handler)(e)
+
+    def handle_user_exception(
+        self, e: Exception
+    ) -> HTTPException | ft.ResponseReturnValue:
+        """This method is called whenever an exception occurs that
+        should be handled. A special case is :class:`~werkzeug
+        .exceptions.HTTPException` which is forwarded to the
+        :meth:`handle_http_exception` method. This function will either
+        return a response value or reraise the exception with the same
+        traceback.
+
+        .. versionchanged:: 1.0
+            Key errors raised from request data like ``form`` show the
+            bad key in debug mode rather than a generic bad request
+            message.
+
+        .. versionadded:: 0.7
+        """
+        if isinstance(e, BadRequestKeyError) and (
+            self.debug or self.config["TRAP_BAD_REQUEST_ERRORS"]
+        ):
+            e.show_exception = True
+
+        if isinstance(e, HTTPException) and not self.trap_http_exception(e):
+            return self.handle_http_exception(e)
+
+        handler = self._find_error_handler(e, request.blueprints)
+
+        if handler is None:
+            raise
+
+        return self.ensure_sync(handler)(e)
+
+    def handle_exception(self, e: Exception) -> Response:
+        """Handle an exception that did not have an error handler
+        associated with it, or that was raised from an error handler.
+        This always causes a 500 ``InternalServerError``.
+
+        Always sends the :data:`got_request_exception` signal.
+
+        If :data:`PROPAGATE_EXCEPTIONS` is ``True``, such as in debug
+        mode, the error will be re-raised so that the debugger can
+        display it. Otherwise, the original exception is logged, and
+        an :exc:`~werkzeug.exceptions.InternalServerError` is returned.
+
+        If an error handler is registered for ``InternalServerError`` or
+        ``500``, it will be used. For consistency, the handler will
+        always receive the ``InternalServerError``. The original
+        unhandled exception is available as ``e.original_exception``.
+
+        .. versionchanged:: 1.1.0
+            Always passes the ``InternalServerError`` instance to the
+            handler, setting ``original_exception`` to the unhandled
+            error.
+
+        .. versionchanged:: 1.1.0
+            ``after_request`` functions and other finalization is done
+            even for the default 500 response when there is no handler.
+
+        .. versionadded:: 0.3
+        """
+        exc_info = sys.exc_info()
+        got_request_exception.send(self, _async_wrapper=self.ensure_sync, exception=e)
+        propagate = self.config["PROPAGATE_EXCEPTIONS"]
+
+        if propagate is None:
+            propagate = self.testing or self.debug
+
+        if propagate:
+            # Re-raise if called with an active exception, otherwise
+            # raise the passed in exception.
+            if exc_info[1] is e:
+                raise
+
+            raise e
+
+        self.log_exception(exc_info)
+        server_error: InternalServerError | ft.ResponseReturnValue
+        server_error = InternalServerError(original_exception=e)
+        handler = self._find_error_handler(server_error, request.blueprints)
+
+        if handler is not None:
+            server_error = self.ensure_sync(handler)(server_error)
+
+        return self.finalize_request(server_error, from_error_handler=True)
+
+    def log_exception(
+        self,
+        exc_info: (tuple[type, BaseException, TracebackType] | tuple[None, None, None]),
+    ) -> None:
+        """Logs an exception.  This is called by :meth:`handle_exception`
+        if debugging is disabled and right before the handler is called.
+        The default implementation logs the exception as error on the
+        :attr:`logger`.
+
+        .. versionadded:: 0.8
+        """
+        self.logger.error(
+            f"Exception on {request.path} [{request.method}]", exc_info=exc_info
+        )
+
+    def dispatch_request(self) -> ft.ResponseReturnValue:
+        """Does the request dispatching.  Matches the URL and returns the
+        return value of the view or error handler.  This does not have to
+        be a response object.  In order to convert the return value to a
+        proper response object, call :func:`make_response`.
+
+        .. versionchanged:: 0.7
+           This no longer does the exception handling, this code was
+           moved to the new :meth:`full_dispatch_request`.
+        """
+        req = request_ctx.request
+        if req.routing_exception is not None:
+            self.raise_routing_exception(req)
+        rule: Rule = req.url_rule  # type: ignore[assignment]
+        # if we provide automatic options for this URL and the
+        # request came with the OPTIONS method, reply automatically
+        if (
+            getattr(rule, "provide_automatic_options", False)
+            and req.method == "OPTIONS"
+        ):
+            return self.make_default_options_response()
+        # otherwise dispatch to the handler for that endpoint
+        view_args: dict[str, t.Any] = req.view_args  # type: ignore[assignment]
+        return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+
+    def full_dispatch_request(self) -> Response:
+        """Dispatches the request and on top of that performs request
+        pre and postprocessing as well as HTTP exception catching and
+        error handling.
+
+        .. versionadded:: 0.7
+        """
+        self._got_first_request = True
+
+        try:
+            request_started.send(self, _async_wrapper=self.ensure_sync)
+            rv = self.preprocess_request()
+            if rv is None:
+                rv = self.dispatch_request()
+        except Exception as e:
+            rv = self.handle_user_exception(e)
+        return self.finalize_request(rv)
+
+    def finalize_request(
+        self,
+        rv: ft.ResponseReturnValue | HTTPException,
+        from_error_handler: bool = False,
+    ) -> Response:
+        """Given the return value from a view function this finalizes
+        the request by converting it into a response and invoking the
+        postprocessing functions.  This is invoked for both normal
+        request dispatching as well as error handlers.
+
+        Because this means that it might be called as a result of a
+        failure a special safe mode is available which can be enabled
+        with the `from_error_handler` flag.  If enabled, failures in
+        response processing will be logged and otherwise ignored.
+
+        :internal:
+        """
+        response = self.make_response(rv)
+        try:
+            response = self.process_response(response)
+            request_finished.send(
+                self, _async_wrapper=self.ensure_sync, response=response
+            )
+        except Exception:
+            if not from_error_handler:
+                raise
+            self.logger.exception(
+                "Request finalizing failed with an error while handling an error"
+            )
+        return response
+
+    def make_default_options_response(self) -> Response:
+        """This method is called to create the default ``OPTIONS`` response.
+        This can be changed through subclassing to change the default
+        behavior of ``OPTIONS`` responses.
+
+        .. versionadded:: 0.7
+        """
+        adapter = request_ctx.url_adapter
+        methods = adapter.allowed_methods()  # type: ignore[union-attr]
+        rv = self.response_class()
+        rv.allow.update(methods)
+        return rv
+
+    def ensure_sync(self, func: t.Callable) -> t.Callable:
+        """Ensure that the function is synchronous for WSGI workers.
+        Plain ``def`` functions are returned as-is. ``async def``
+        functions are wrapped to run and wait for the response.
+
+        Override this method to change how the app runs async views.
+
+        .. versionadded:: 2.0
+        """
+        if iscoroutinefunction(func):
+            return self.async_to_sync(func)
+
+        return func
+
+    def async_to_sync(
+        self, func: t.Callable[..., t.Coroutine]
+    ) -> t.Callable[..., t.Any]:
+        """Return a sync function that will run the coroutine function.
+
+        .. code-block:: python
+
+            result = app.async_to_sync(func)(*args, **kwargs)
+
+        Override this method to change how the app converts async code
+        to be synchronously callable.
+
+        .. versionadded:: 2.0
+        """
+        try:
+            from asgiref.sync import async_to_sync as asgiref_async_to_sync
+        except ImportError:
+            raise RuntimeError(
+                "Install Flask with the 'async' extra in order to use async views."
+            ) from None
+
+        return asgiref_async_to_sync(func)
+
+    def url_for(
+        self,
+        /,
+        endpoint: str,
+        *,
+        _anchor: str | None = None,
+        _method: str | None = None,
+        _scheme: str | None = None,
+        _external: bool | None = None,
+        **values: t.Any,
+        .. versionadded:: 0.5
+
+        """
+        if not self.has_static_folder:
+            raise RuntimeError("'static_folder' must be set to serve static_files.")
+
+        # send_file only knows to call get_send_file_max_age on the app,
+        # call it here so it works for blueprints too.
+        max_age = self.get_send_file_max_age(filename)
+        return send_from_directory(
+            t.cast(str, self.static_folder), filename, max_age=max_age
+        )
+
+    def open_resource(self, resource: str, mode: str = "rb") -> t.IO[t.AnyStr]:
+        """Open a resource file relative to :attr:`root_path` for
+        reading.
+
+        For example, if the file ``schema.sql`` is next to the file
+        ``app.py`` where the ``Flask`` app is defined, it can be opened
+        with:
+
+        .. code-block:: python
+
+            with app.open_resource("schema.sql") as f:
+                conn.executescript(f.read())
+
+        :param resource: Path to the resource relative to
+            :attr:`root_path`.
+        :param mode: Open the file in this mode. Only reading is
+            supported, valid values are "r" (or "rt") and "rb".
+
+        Note this is a duplicate of the same method in the Flask
+        class.
+
+        """
+        if mode not in {"r", "rt", "rb"}:
+            raise ValueError("Resources can only be opened for reading.")
+
+        return open(os.path.join(self.root_path, resource), mode)
+
+    def open_instance_resource(self, resource: str, mode: str = "rb") -> t.IO[t.AnyStr]:
+        """Opens a resource from the application's instance folder
+        (:attr:`instance_path`).  Otherwise works like
+        :meth:`open_resource`.  Instance resources can also be opened for
+        writing.
+
+        :param resource: the name of the resource.  To access resources within
+                         subfolders use forward slashes as separator.
+        :param mode: resource file opening mode, default is 'rb'.
+        """
+        return open(os.path.join(self.instance_path, resource), mode)
+
+    def create_jinja_environment(self) -> Environment:
+        """Create the Jinja environment based on :attr:`jinja_options`
+        and the various Jinja-related methods of the app. Changing
+        :attr:`jinja_options` after this will have no effect. Also adds
+        Flask-related globals and filters to the environment.
+
+        .. versionchanged:: 0.11
+           ``Environment.auto_reload`` set in accordance with
+           ``TEMPLATES_AUTO_RELOAD`` configuration option.
+
+        .. versionadded:: 0.5
+        """
+        options = dict(self.jinja_options)
+
+        if "autoescape" not in options:
+            options["autoescape"] = self.select_jinja_autoescape
+
+        if "auto_reload" not in options:
+            auto_reload = self.config["TEMPLATES_AUTO_RELOAD"]
+
+            if auto_reload is None:
+                auto_reload = self.debug
+
+            options["auto_reload"] = auto_reload
+
+        rv = self.jinja_environment(self, **options)
+        rv.globals.update(
+            url_for=self.url_for,
+            get_flashed_messages=get_flashed_messages,
+            config=self.config,
+            # request, session and g are normally added with the
+            # context processor for efficiency reasons but for imported
+            # templates we also want the proxies in there.
+            request=request,
+            session=session,
+            g=g,
+        )
+        rv.policies["json.dumps_function"] = self.json.dumps
+        return rv
+
+    def create_url_adapter(self, request: Request | None) -> MapAdapter | None:
+        """Creates a URL adapter for the given request. The URL adapter
+        is created at a point where the request context is not yet set
+        up so the request is passed explicitly.
+
+        .. versionadded:: 0.6
+
+        .. versionchanged:: 0.9
+           This can now also be called without a request object when the
+           URL adapter is created for the application context.
+
+        .. versionchanged:: 1.0
+            :data:`SERVER_NAME` no longer implicitly enables subdomain
+            matching. Use :attr:`subdomain_matching` instead.
+        """
+        if request is not None:
+            # If subdomain matching is disabled (the default), use the
+            # default subdomain in all cases. This should be the default
+            # in Werkzeug but it currently does not have that feature.
+            if not self.subdomain_matching:
+                subdomain = self.url_map.default_subdomain or None
+            else:
+                subdomain = None
+
+            return self.url_map.bind_to_environ(
+                request.environ,
+                server_name=self.config["SERVER_NAME"],
+                subdomain=subdomain,
+            )
+        # We need at the very least the server name to be set for this
+        # to work.
+        if self.config["SERVER_NAME"] is not None:
+            return self.url_map.bind(
+                self.config["SERVER_NAME"],
+                script_name=self.config["APPLICATION_ROOT"],
+                url_scheme=self.config["PREFERRED_URL_SCHEME"],
+            )
+
+        return None
+
+    def raise_routing_exception(self, request: Request) -> t.NoReturn:
+        """Intercept routing exceptions and possibly do something else.
+
+        In debug mode, intercept a routing redirect and replace it with
+        an error if the body will be discarded.
+
+        With modern Werkzeug this shouldn't occur, since it now uses a
+        308 status which tells the browser to resend the method and
+        body.
+
+        .. versionchanged:: 2.1
+            Don't intercept 307 and 308 redirects.
+
+        :meta private:
+        :internal:
+        """
+        if (
+            not self.debug
+            or not isinstance(request.routing_exception, RequestRedirect)
+            or request.routing_exception.code in {307, 308}
+            or request.method in {"GET", "HEAD", "OPTIONS"}
+        ):
+            raise request.routing_exception  # type: ignore
+
+        from .debughelpers import FormDataRoutingRedirect
+
+        raise FormDataRoutingRedirect(request)
+
+    def update_template_context(self, context: dict) -> None:
+        """Update the template context with some commonly used variables.
+        This injects request, session, config and g into the template
+        context as well as everything template context processors want
+        to inject.  Note that the as of Flask 0.6, the original values
+        in the context will not be overridden if a context processor
+        decides to return a value with the same key.
+
+        :param context: the context as a dictionary that is updated in place
+                        to add extra variables.
+        """
+        names: t.Iterable[str | None] = (None,)
+
+        # A template may be rendered outside a request context.
+        if request:
+            names = chain(names, reversed(request.blueprints))
+
+        # The values passed to render_template take precedence. Keep a
+        # copy to re-apply after all context functions.
+        orig_ctx = context.copy()
+
+        for name in names:
+            if name in self.template_context_processors:
+                for func in self.template_context_processors[name]:
+                    context.update(self.ensure_sync(func)())
+
+        context.update(orig_ctx)
+
+    def make_shell_context(self) -> dict:
+        """Returns the shell context for an interactive shell for this
+        application.  This runs all the registered shell context
+        processors.
+
+        .. versionadded:: 0.11
+        """
+        rv = {"app": self, "g": g}
+        for processor in self.shell_context_processors:
+            rv.update(processor())
+        return rv
+
+    def run(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        debug: bool | None = None,
+        load_dotenv: bool = True,
+        **options: t.Any,
+    ) -> None:
+        """Runs the application on a local development server.
+
+        Do not use ``run()`` in a production setting. It is not intended to
+        meet security and performance requirements for a production server.
+        Instead, see :doc:`/deploying/index` for WSGI server recommendations.
+
+        If the :attr:`debug` flag is set the server will automatically reload
+        for code changes and show a debugger in case an exception happened.
+
+        If you want to run the application in debug mode, but disable the
+        code execution on the interactive debugger, you can pass
+        ``use_evalex=False`` as parameter.  This will keep the debugger's
+        traceback screen active, but disable code execution.
+
+        It is not recommended to use this function for development with
+        automatic reloading as this is badly supported.  Instead you should
+        be using the :command:`flask` command line script's ``run`` support.
+
+        .. admonition:: Keep in Mind
+
+           Flask will suppress any server error with a generic error page
+           unless it is in debug mode.  As such to enable just the
+           interactive debugger without the code reloading, you have to
+           invoke :meth:`run` with ``debug=True`` and ``use_reloader=False``.
+           Setting ``use_debugger`` to ``True`` without being in debug mode
+           won't catch any exceptions because there won't be any to
+           catch.
+
+        :param host: the hostname to listen on. Set this to ``'0.0.0.0'`` to
+            have the server available externally as well. Defaults to
+            ``'127.0.0.1'`` or the host in the ``SERVER_NAME`` config variable
+            if present.
+        :param port: the port of the webserver. Defaults to ``5000`` or the
+            port defined in the ``SERVER_NAME`` config variable if present.
+        :param debug: if given, enable or disable debug mode. See
+            :attr:`debug`.
+        :param load_dotenv: Load the nearest :file:`.env` and :file:`.flaskenv`
+            files to set environment variables. Will also change the working
+            directory to the directory containing the first file found.
+        :param options: the options to be forwarded to the underlying Werkzeug
+            server. See :func:`werkzeug.serving.run_simple` for more
+            information.
+
+        .. versionchanged:: 1.0
+            If installed, python-dotenv will be used to load environment
+            variables from :file:`.env` and :file:`.flaskenv` files.
+
+            The :envvar:`FLASK_DEBUG` environment variable will override :attr:`debug`.
+
+            Threaded mode is enabled by default.
+
+        .. versionchanged:: 0.10
+            The default port is now picked from the ``SERVER_NAME``
+            variable.
+        """
+        # Ignore this call so that it doesn't start another server if
+        # the 'flask run' command is used.
+        if os.environ.get("FLASK_RUN_FROM_CLI") == "true":
+            if not is_running_from_reloader():
+                click.secho(
+                    " * Ignoring a call to 'app.run()' that would block"
+                    " the current 'flask' CLI command.\n"
+                    "   Only call 'app.run()' in an 'if __name__ =="
+                    ' "__main__"\' guard.',
+                    fg="red",
+                )
+
+            return
+
+        if get_load_dotenv(load_dotenv):
+            cli.load_dotenv()
+
+            # if set, env var overrides existing value
+            if "FLASK_DEBUG" in os.environ:
+                self.debug = get_debug_flag()
+
+        # debug passed to method overrides all other sources
+        if debug is not None:
+            self.debug = bool(debug)
+
+        server_name = self.config.get("SERVER_NAME")
+        sn_host = sn_port = None
+
+        if server_name:
+            sn_host, _, sn_port = server_name.partition(":")
+
+        if not host:
+            if sn_host:
+                host = sn_host
+            else:
+                host = "127.0.0.1"
+
+        if port or port == 0:
+            port = int(port)
+        elif sn_port:
+            port = int(sn_port)
+        else:
+            port = 5000
+
+        options.setdefault("use_reloader", self.debug)
+        options.setdefault("use_debugger", self.debug)
+        options.setdefault("threaded", True)
+
+        cli.show_server_banner(self.debug, self.name)
+
+        from werkzeug.serving import run_simple
+
+        try:
+            run_simple(t.cast(str, host), port, self, **options)
+        finally:
+            # reset the first request information if the development server
+            # reset normally.  This makes it possible to restart the server
+            # without reloader and that stuff from an interactive shell.
+            self._got_first_request = False
+
+    def test_client(self, use_cookies: bool = True, **kwargs: t.Any) -> FlaskClient:
+        """Creates a test client for this application.  For information
+        about unit testing head over to :doc:`/testing`.
+
+        Note that if you are testing for assertions or exceptions in your
+        application code, you must set ``app.testing = True`` in order for the
+        exceptions to propagate to the test client.  Otherwise, the exception
+        will be handled by the application (not visible to the test client) and
+        the only indication of an AssertionError or other exception will be a
+        500 status code response to the test client.  See the :attr:`testing`
+        attribute.  For example::
+
+            app.testing = True
+            client = app.test_client()
+
+        The test client can be used in a ``with`` block to defer the closing down
+        of the context until the end of the ``with`` block.  This is useful if
+        you want to access the context locals for testing::
+
+            with app.test_client() as c:
+                rv = c.get('/?vodka=42')
+                assert request.args['vodka'] == '42'
+
+        Additionally, you may pass optional keyword arguments that will then
+        be passed to the application's :attr:`test_client_class` constructor.
+        For example::
+
+            from flask.testing import FlaskClient
+
+            class CustomClient(FlaskClient):
+                def __init__(self, *args, **kwargs):
+                    self._authentication = kwargs.pop("authentication")
+                    super(CustomClient,self).__init__( *args, **kwargs)
+
+            app.test_client_class = CustomClient
+            client = app.test_client(authentication='Basic ....')
+
+        See :class:`~flask.testing.FlaskClient` for more information.
+
+        .. versionchanged:: 0.4
+           added support for ``with`` block usage for the client.
+
+        .. versionadded:: 0.7
+           The `use_cookies` parameter was added as well as the ability
+           to override the client to be used by setting the
+           :attr:`test_client_class` attribute.
+
+        .. versionchanged:: 0.11
+           Added `**kwargs` to support passing additional keyword arguments to
+           the constructor of :attr:`test_client_class`.
+        """
+        cls = self.test_client_class
+        if cls is None:
+            from .testing import FlaskClient as cls
+        return cls(  # type: ignore
+            self, self.response_class, use_cookies=use_cookies, **kwargs
+        )
+
+    def test_cli_runner(self, **kwargs: t.Any) -> FlaskCliRunner:
+        """Create a CLI runner for testing CLI commands.
+        See :ref:`testing-cli`.
+
+        Returns an instance of :attr:`test_cli_runner_class`, by default
+        :class:`~flask.testing.FlaskCliRunner`. The Flask app object is
+        passed as the first argument.
+
+        .. versionadded:: 1.0
+        """
+        cls = self.test_cli_runner_class
+
+        if cls is None:
+            from .testing import FlaskCliRunner as cls
+
+        return cls(self, **kwargs)  # type: ignore
+
+    def handle_http_exception(
+        self, e: HTTPException
+    ) -> HTTPException | ft.ResponseReturnValue:
+        """Handles an HTTP exception.  By default this will invoke the
+        registered error handlers and fall back to returning the
+        exception as response.
+
+        .. versionchanged:: 1.0.3
+            ``RoutingException``, used internally for actions such as
+             slash redirects during routing, is not passed to error
+             handlers.
+
+        .. versionchanged:: 1.0
+            Exceptions are looked up by code *and* by MRO, so
+            ``HTTPException`` subclasses can be handled with a catch-all
+            handler for the base ``HTTPException``.
+
+        .. versionadded:: 0.3
+        """
+        # Proxy exceptions don't have error codes.  We want to always return
+        # those unchanged as errors
+        if e.code is None:
+            return e
+
+        # RoutingExceptions are used internally to trigger routing
+        # actions, such as slash redirects raising RequestRedirect. They
+        # are not raised or handled in user code.
+        if isinstance(e, RoutingException):
+            return e
+
+        handler = self._find_error_handler(e, request.blueprints)
+        if handler is None:
+            return e
+        return self.ensure_sync(handler)(e)
+
+    def handle_user_exception(
+        self, e: Exception
+    ) -> HTTPException | ft.ResponseReturnValue:
+        """This method is called whenever an exception occurs that
+        should be handled. A special case is :class:`~werkzeug
+        .exceptions.HTTPException` which is forwarded to the
+        :meth:`handle_http_exception` method. This function will either
+        return a response value or reraise the exception with the same
+        traceback.
+
+        .. versionchanged:: 1.0
+            Key errors raised from request data like ``form`` show the
+            bad key in debug mode rather than a generic bad request
+            message.
+
+        .. versionadded:: 0.7
+        """
+        if isinstance(e, BadRequestKeyError) and (
+            self.debug or self.config["TRAP_BAD_REQUEST_ERRORS"]
+        ):
+            e.show_exception = True
+
+        if isinstance(e, HTTPException) and not self.trap_http_exception(e):
+            return self.handle_http_exception(e)
+
+        handler = self._find_error_handler(e, request.blueprints)
+
+        if handler is None:
+            raise
+
+        return self.ensure_sync(handler)(e)
+
+    def handle_exception(self, e: Exception) -> Response:
+        """Handle an exception that did not have an error handler
+        associated with it, or that was raised from an error handler.
+        This always causes a 500 ``InternalServerError``.
+
+        Always sends the :data:`got_request_exception` signal.
+
+        If :data:`PROPAGATE_EXCEPTIONS` is ``True``, such as in debug
+        mode, the error will be re-raised so that the debugger can
+        display it. Otherwise, the original exception is logged, and
+        an :exc:`~werkzeug.exceptions.InternalServerError` is returned.
+
+        If an error handler is registered for ``InternalServerError`` or
+        ``500``, it will be used. For consistency, the handler will
+        always receive the ``InternalServerError``. The original
+        unhandled exception is available as ``e.original_exception``.
+
+        .. versionchanged:: 1.1.0
+            Always passes the ``InternalServerError`` instance to the
+            handler, setting ``original_exception`` to the unhandled
+            error.
+
+        .. versionchanged:: 1.1.0
+            ``after_request`` functions and other finalization is done
+            even for the default 500 response when there is no handler.
+
+        .. versionadded:: 0.3
+        """
+        exc_info = sys.exc_info()
+        got_request_exception.send(self, _async_wrapper=self.ensure_sync, exception=e)
+        propagate = self.config["PROPAGATE_EXCEPTIONS"]
+
+        if propagate is None:
+            propagate = self.testing or self.debug
+
+        if propagate:
+            # Re-raise if called with an active exception, otherwise
+            # raise the passed in exception.
+            if exc_info[1] is e:
+                raise
+
+            raise e
+
+        self.log_exception(exc_info)
+        server_error: InternalServerError | ft.ResponseReturnValue
+        server_error = InternalServerError(original_exception=e)
+        handler = self._find_error_handler(server_error, request.blueprints)
+
+        if handler is not None:
+            server_error = self.ensure_sync(handler)(server_error)
+
+        return self.finalize_request(server_error, from_error_handler=True)
+
+    def log_exception(
+        self,
+        exc_info: (tuple[type, BaseException, TracebackType] | tuple[None, None, None]),
+    ) -> None:
+        """Logs an exception.  This is called by :meth:`handle_exception`
+        if debugging is disabled and right before the handler is called.
+        The default implementation logs the exception as error on the
+        :attr:`logger`.
+
+        .. versionadded:: 0.8
+        """
+        self.logger.error(
+            f"Exception on {request.path} [{request.method}]", exc_info=exc_info
+        )
+
+    def dispatch_request(self) -> ft.ResponseReturnValue:
+        """Does the request dispatching.  Matches the URL and returns the
+        return value of the view or error handler.  This does not have to
+        be a response object.  In order to convert the return value to a
+        proper response object, call :func:`make_response`.
+
+        .. versionchanged:: 0.7
+           This no longer does the exception handling, this code was
+           moved to the new :meth:`full_dispatch_request`.
+        """
+        req = request_ctx.request
+        if req.routing_exception is not None:
+            self.raise_routing_exception(req)
+        rule: Rule = req.url_rule  # type: ignore[assignment]
+        # if we provide automatic options for this URL and the
+        # request came with the OPTIONS method, reply automatically
+        if (
+            getattr(rule, "provide_automatic_options", False)
+            and req.method == "OPTIONS"
+        ):
+            return self.make_default_options_response()
+        # otherwise dispatch to the handler for that endpoint
+        view_args: dict[str, t.Any] = req.view_args  # type: ignore[assignment]
+        return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+
+    def full_dispatch_request(self) -> Response:
+        """Dispatches the request and on top of that performs request
+        pre and postprocessing as well as HTTP exception catching and
+        error handling.
+
+        .. versionadded:: 0.7
+        """
+        self._got_first_request = True
+
+        try:
+            request_started.send(self, _async_wrapper=self.ensure_sync)
+            rv = self.preprocess_request()
+            if rv is None:
+                rv = self.dispatch_request()
+        except Exception as e:
+            rv = self.handle_user_exception(e)
+        return self.finalize_request(rv)
+
+    def finalize_request(
+        self,
+        rv: ft.ResponseReturnValue | HTTPException,
+        from_error_handler: bool = False,
+    ) -> Response:
+        """Given the return value from a view function this finalizes
+        the request by converting it into a response and invoking the
+        postprocessing functions.  This is invoked for both normal
+        request dispatching as well as error handlers.
+
+        Because this means that it might be called as a result of a
+        failure a special safe mode is available which can be enabled
+        with the `from_error_handler` flag.  If enabled, failures in
+        response processing will be logged and otherwise ignored.
+
+        :internal:
+        """
+        response = self.make_response(rv)
+        try:
+            response = self.process_response(response)
+            request_finished.send(
+                self, _async_wrapper=self.ensure_sync, response=response
+            )
+        except Exception:
+            if not from_error_handler:
+                raise
+            self.logger.exception(
+                "Request finalizing failed with an error while handling an error"
+            )
+        return response
+
+    def make_default_options_response(self) -> Response:
+        """This method is called to create the default ``OPTIONS`` response.
+        This can be changed through subclassing to change the default
+        behavior of ``OPTIONS`` responses.
+
+        .. versionadded:: 0.7
+        """
+        adapter = request_ctx.url_adapter
+        methods = adapter.allowed_methods()  # type: ignore[union-attr]
+        rv = self.response_class()
+        rv.allow.update(methods)
+        return rv
+
+    def ensure_sync(self, func: t.Callable) -> t.Callable:
+        """Ensure that the function is synchronous for WSGI workers.
+        Plain ``def`` functions are returned as-is. ``async def``
+        functions are wrapped to run and wait for the response.
+
+        Override this method to change how the app runs async views.
+
+        .. versionadded:: 2.0
+        """
+        if iscoroutinefunction(func):
+            return self.async_to_sync(func)
+
+        return func
+
+    def async_to_sync(
+        self, func: t.Callable[..., t.Coroutine]
+    ) -> t.Callable[..., t.Any]:
+        """Return a sync function that will run the coroutine function.
+
+        .. code-block:: python
+
+            result = app.async_to_sync(func)(*args, **kwargs)
+
+        Override this method to change how the app converts async code
+        to be synchronously callable.
+
+        .. versionadded:: 2.0
+        """
+        try:
+            from asgiref.sync import async_to_sync as asgiref_async_to_sync
+        except ImportError:
+            raise RuntimeError(
+                "Install Flask with the 'async' extra in order to use async views."
+            ) from None
+
+        return asgiref_async_to_sync(func)
+
+    def url_for(
+        self,
+        /,
+        endpoint: str,
+        *,
+        _anchor: str | None = None,
+        _method: str | None = None,
+        _scheme: str | None = None,
+        _external: bool | None = None,
+        **values: t.Any,
     ) -> str:
         """Generate a URL to the given endpoint with the given values.
 
