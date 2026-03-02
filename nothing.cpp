@@ -1,1 +1,1 @@
-#define	FOO			BAR			// Baz asdfasdgsadgasdg
+#define	FOO			BAR			// Baz asdfasdgsadgasdg asdfasdfadsf
